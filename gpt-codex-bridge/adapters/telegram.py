@@ -174,7 +174,7 @@ class TelegramAdapter:
             return None
         match = _COMMAND_RE.fullmatch(text.strip())
         if not match:
-            reply = "請使用 /run <task>、/run-read <task>、/run-full <task>、/status 或 /result <job_id>。"
+            reply = "請使用 /ping、/run <task>、/run-read <task>、/run-full <task>、/status 或 /result <job_id>。"
             self._send_reply(chat_id, reply)
             return reply
         command = match.group("command").lower()
@@ -182,9 +182,11 @@ class TelegramAdapter:
 
         if command in {"start", "help"}:
             reply = (
-                "Codex job runner 已啟動。使用 /run <task>、/run-read <task>、"
+                "Codex job runner 已啟動。使用 /ping、/run <task>、/run-read <task>、"
                 "/run-full <task>、/status、/result <job_id>。"
             )
+        elif command == "ping":
+            reply = "PONG"
         elif command == "status":
             reply = self._status(chat_id)
         elif command in _RUN_COMMAND_MODES:
@@ -195,7 +197,7 @@ class TelegramAdapter:
             reply = await self._meeting_reply(message, chat_id, command, args)
         else:
             reply = (
-                "未知命令。可用：/run、/run-read、/run-full、/status、/result、"
+                "未知命令。可用：/ping、/run、/run-read、/run-full、/status、/result、"
                 "/hermes、/gpt、/gemini、/all、/roundtable、/agents、/meeting-status、"
                 "/meeting-stop、/meeting-reset。"
             )

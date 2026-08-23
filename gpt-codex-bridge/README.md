@@ -103,6 +103,7 @@ Supported Telegram commands:
 
 ```text
 /start
+/ping
 /status
 /run <task>
 /run-read <task>

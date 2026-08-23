@@ -17,6 +17,11 @@ class FakeClient:
         self.sent.append((chat_id, text))
 
 
+class ExplodingMeetingClient:
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"Meeting Room should not be called for /ping: {name}")
+
+
 def make_settings(directory: str) -> Settings:
     workspace = Path(directory) / "repo"
     workspace.mkdir()
@@ -36,6 +41,24 @@ def update(text: str) -> dict:
 
 
 class TelegramAdapterTests(unittest.TestCase):
+    def test_ping_replies_pong_without_queue_or_meeting_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            client = FakeClient()
+            adapter = TelegramAdapter(
+                settings,
+                queue,
+                client,
+                meeting_client=ExplodingMeetingClient(),
+            )
+
+            reply = adapter.handle_update(update("/ping"))
+
+            self.assertEqual(reply, "PONG")
+            self.assertEqual(client.sent, [("42", "PONG")])
+            self.assertEqual(queue.counts(), {"queued": 0, "running": 0, "succeeded": 0, "failed": 0})
+
     def test_authorized_run_enqueues_without_starting_codex(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = make_settings(directory)
