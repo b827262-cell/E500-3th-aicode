@@ -28,9 +28,11 @@ Telegram adapter drain
 ```
 
 AI Meeting commands are proxied from this same E500 Telegram polling process to
-the remote TUF A16 Meeting Room at `http://10.0.3.67:8000`. E500 does not start
-local Hermes, GPT, or Gemini Meeting agents, and there must remain only one
-Telegram polling process.
+the remote TUF A16 Meeting Room at `http://10.0.3.67:8000`. `/hermes` and
+`/gemini` are Meeting Room requests; `/gpt` is an alias for the local `/run`
+Codex job path. `/all` and `/roundtable` remain Meeting Room operations and may
+include the remote GPT agent. There must remain only one Telegram polling
+process.
 
 未來的 MCP/HTTP adapter 只需要呼叫同一個 `JobQueue.submit()`；adapter 不得各自啟動 Codex。
 
@@ -106,12 +108,12 @@ Supported Telegram commands:
 /ping
 /status
 /run <task>
+/gpt <task>
 /run-read <task>
 /run-full <task>
 /result <job_id>
 
 /hermes <message>
-/gpt <message>
 /gemini <message>
 /all <message>
 /roundtable <message>
@@ -173,7 +175,10 @@ codex exec \
 }
 ```
 
-Telegram `/result` reads this structured report; it does not parse natural-language Codex stdout.
+When a job reaches a terminal state, the Telegram adapter automatically reads
+this structured report and sends a safe result summary to the originating chat.
+`/result <job_id>` remains available for historical queries; neither path
+parses natural-language Codex stdout.
 
 ## Tests
 

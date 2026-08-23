@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -45,6 +46,7 @@ def finish_job(
     sandbox_mode: str = "workspace-write",
     error: str | None = None,
     exit_code: int = 0,
+    report: dict | None = None,
 ):
     job = queue.submit(
         chat_id=42,
@@ -53,10 +55,14 @@ def finish_job(
         sandbox_mode=sandbox_mode,
     )
     assert queue.claim_next() is not None
+    report_path = None
+    if report is not None:
+        report_path = queue.db_path.parent / f"{job.id}.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
     queue.finish(
         job.id,
         succeeded=succeeded,
-        report_path=None,
+        report_path=report_path,
         error=error,
         exit_code=exit_code,
     )
@@ -157,6 +163,15 @@ class NotificationOutboxTests(unittest.TestCase):
                 succeeded=True,
                 sandbox_mode="read-only",
                 exit_code=0,
+                report={
+                    "status": "success",
+                    "summary": "implemented AUTO-RESULT-001",
+                    "changed_files": ["adapters/telegram.py", "tests/test_notifications.py"],
+                    "tests": [],
+                    "git_status": "",
+                    "needs_attention": False,
+                    "sandbox_mode": "read-only",
+                },
             )
             client = FakeNotificationClient()
             adapter = TelegramAdapter(settings, queue, client)
@@ -173,9 +188,71 @@ class NotificationOutboxTests(unittest.TestCase):
             self.assertIn(f"Job: {job.id}", text)
             self.assertIn("Status: succeeded", text)
             self.assertIn("Sandbox: read-only", text)
+            self.assertIn("Result:\nimplemented AUTO-RESULT-001", text)
+            self.assertIn("Changed files:\nadapters/telegram.py, tests/test_notifications.py", text)
+            self.assertIn("Needs attention: no", text)
             self.assertIn("Exit code: 0", text)
             self.assertIn(f"/result {job.id}", text)
-            self.assertNotIn("changed_files", text)
+
+    def test_failed_notification_includes_failure_report_and_redacts_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            job = finish_job(
+                queue,
+                settings,
+                succeeded=False,
+                error="Codex failed while handling bot-secret",
+                exit_code=7,
+                report={
+                    "status": "failed",
+                    "summary": "failure summary contains bot-secret",
+                    "changed_files": ["private-key-check.txt"],
+                    "tests": [],
+                    "git_status": "",
+                    "needs_attention": True,
+                    "sandbox_mode": "workspace-write",
+                },
+            )
+            client = FakeNotificationClient()
+            adapter = TelegramAdapter(settings, queue, client)
+
+            self.assertEqual(adapter.drain_notifications(), 1)
+            text = client.sent[0][1]
+            self.assertIn("❌ Codex job failed", text)
+            self.assertIn(f"Job: {job.id}", text)
+            self.assertIn("Status: failed", text)
+            self.assertIn("Result:\nfailure summary contains [REDACTED]", text)
+            self.assertIn("Changed files:\nprivate-key-check.txt", text)
+            self.assertIn("Needs attention: yes", text)
+            self.assertIn("Error: Codex failed while handling [REDACTED]", text)
+            self.assertNotIn("bot-secret", text)
+
+    def test_notification_splits_long_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            job = finish_job(
+                queue,
+                settings,
+                succeeded=True,
+                report={
+                    "status": "success",
+                    "summary": "s" * 1000,
+                    "changed_files": [f"{'x' * 300}-{index}.py" for index in range(10)],
+                    "tests": [],
+                    "git_status": "",
+                    "needs_attention": False,
+                    "sandbox_mode": "workspace-write",
+                },
+            )
+            client = FakeNotificationClient()
+            adapter = TelegramAdapter(settings, queue, client)
+
+            self.assertEqual(adapter.drain_notifications(), 1)
+            self.assertGreater(len(client.sent), 1)
+            self.assertTrue(all(len(text) <= 4096 for _, text in client.sent))
+            self.assertTrue(any(job.id in text for _, text in client.sent))
 
     def test_temporary_telegram_failure_remains_retryable_and_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

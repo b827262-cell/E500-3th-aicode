@@ -80,13 +80,13 @@ _COMMAND_RE = re.compile(r"^/(?P<command>[A-Za-z0-9_-]+)(?:@[A-Za-z0-9_]+)?(?:\s
 
 _RUN_COMMAND_MODES = {
     "run": DEFAULT_SANDBOX_MODE,
+    "gpt": DEFAULT_SANDBOX_MODE,
     "run-read": "read-only",
     "run-full": "danger-full-access",
 }
 
 _MEETING_COMMANDS = {
     "hermes",
-    "gpt",
     "gemini",
     "all",
     "roundtable",
@@ -174,7 +174,7 @@ class TelegramAdapter:
             return None
         match = _COMMAND_RE.fullmatch(text.strip())
         if not match:
-            reply = "請使用 /ping、/run <task>、/run-read <task>、/run-full <task>、/status 或 /result <job_id>。"
+            reply = "請使用 /ping、/run <task>、/gpt <task>、/run-read <task>、/run-full <task>、/status 或 /result <job_id>。"
             self._send_reply(chat_id, reply)
             return reply
         command = match.group("command").lower()
@@ -183,7 +183,7 @@ class TelegramAdapter:
         if command in {"start", "help"}:
             reply = (
                 "Codex job runner 已啟動。使用 /ping、/run <task>、/run-read <task>、"
-                "/run-full <task>、/status、/result <job_id>。"
+                "/run-full <task>、/gpt <task>、/status、/result <job_id>。"
             )
         elif command == "ping":
             reply = "PONG"
@@ -197,8 +197,8 @@ class TelegramAdapter:
             reply = await self._meeting_reply(message, chat_id, command, args)
         else:
             reply = (
-                "未知命令。可用：/ping、/run、/run-read、/run-full、/status、/result、"
-                "/hermes、/gpt、/gemini、/all、/roundtable、/agents、/meeting-status、"
+                "未知命令。可用：/ping、/run、/gpt、/run-read、/run-full、/status、/result、"
+                "/hermes、/gemini、/all、/roundtable、/agents、/meeting-status、"
                 "/meeting-stop、/meeting-reset。"
             )
 
@@ -280,7 +280,7 @@ class TelegramAdapter:
             if command == "agents":
                 data = await self.meeting_client.agents()
                 return "🤖 Meeting Room Agents\n" + (response_text(data) or str(data))
-            if command in {"hermes", "gpt", "gemini"}:
+            if command in {"hermes", "gemini"}:
                 if not args:
                     return f"用法：/{command} <message>"
                 data = await self.meeting_client.ask(command, payload)
@@ -350,14 +350,10 @@ class TelegramAdapter:
             return "找不到這個 job。"
         if job.report_path is None or not job.report_path.is_file():
             return f"{job.id}: {job.status} sandbox_mode={job.sandbox_mode}"
-        try:
-            report = json.loads(job.report_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        report = self._load_report(job)
+        if report is None:
             return f"{job.id}: {job.status} sandbox_mode={job.sandbox_mode}（report 尚未可讀取）"
-        summary = str(report.get("summary", "無摘要")).strip()
-        changed = report.get("changed_files", [])
-        changed_text = ", ".join(str(item) for item in changed[:10]) if changed else "none"
-        attention = "yes" if report.get("needs_attention") else "no"
+        summary, changed_text, attention = self._report_values(report)
         return (
             f"{job.id}: {report.get('status', job.status)}\n"
             f"sandbox_mode: {job.sandbox_mode}\n"
@@ -365,6 +361,27 @@ class TelegramAdapter:
             f"changed_files: {changed_text}\n"
             f"needs_attention: {attention}"
         )
+
+    @staticmethod
+    def _load_report(job: Job) -> dict[str, Any] | None:
+        if job.report_path is None or not job.report_path.is_file():
+            return None
+        try:
+            report = json.loads(job.report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return report if isinstance(report, dict) else None
+
+    def _report_values(self, report: dict[str, Any]) -> tuple[str, str, str]:
+        summary = self._safe_short(report.get("summary", "無摘要"), limit=1000)
+        changed = report.get("changed_files", [])
+        if isinstance(changed, list):
+            changed_items = [self._safe_short(item, limit=300) for item in changed[:10]]
+        else:
+            changed_items = []
+        changed_text = ", ".join(item for item in changed_items if item) or "none"
+        attention = "yes" if report.get("needs_attention") else "no"
+        return summary, changed_text, attention
 
     def _safe_short(self, value: Any, *, limit: int = 300) -> str:
         text = str(value)
@@ -378,23 +395,35 @@ class TelegramAdapter:
         if job is None:
             raise ValueError("notification job does not exist")
         exit_code = job.exit_code if job.exit_code is not None else "unknown"
+        report = self._load_report(job)
+        if report is None:
+            summary = self._safe_short(
+                job.error or "Structured report is unavailable", limit=1000
+            )
+            changed_text = "none"
+            attention = "yes"
+        else:
+            summary, changed_text, attention = self._report_values(report)
+        status = "succeeded" if notification.event_type == "succeeded" else "failed"
+        details = (
+            f"Job: {job.id}\n"
+            f"Status: {status}\n"
+            f"Sandbox: {job.sandbox_mode}\n\n"
+            f"Result:\n{summary}\n\n"
+            f"Changed files:\n{changed_text}\n\n"
+            f"Needs attention: {attention}\n"
+            f"Workspace: {job.workspace}\n"
+            f"Exit code: {exit_code}"
+        )
         if notification.event_type == "succeeded":
             return (
                 "✅ Codex job completed\n\n"
-                f"Job: {job.id}\n"
-                "Status: succeeded\n"
-                f"Sandbox: {job.sandbox_mode}\n"
-                f"Workspace: {job.workspace}\n"
-                f"Exit code: {exit_code}\n\n"
+                f"{details}\n\n"
                 f"/result {job.id}"
             )
         return (
             "❌ Codex job failed\n\n"
-            f"Job: {job.id}\n"
-            "Status: failed\n"
-            f"Sandbox: {job.sandbox_mode}\n"
-            f"Workspace: {job.workspace}\n"
-            f"Exit code: {exit_code}\n"
+            f"{details}\n"
             f"Error: {self._safe_short(job.error or 'Codex job failed')}\n\n"
             f"/result {job.id}"
         )

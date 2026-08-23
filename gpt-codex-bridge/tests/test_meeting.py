@@ -196,7 +196,6 @@ class MeetingTelegramAdapterTests(unittest.TestCase):
             adapter, telegram = self._adapter(directory, meeting)
             for command in (
                 "/hermes HERMES",
-                "/gpt GPT",
                 "/gemini GEMINI",
                 "/all all",
                 "/roundtable table",

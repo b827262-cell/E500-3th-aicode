@@ -71,6 +71,28 @@ class TelegramAdapterTests(unittest.TestCase):
             self.assertIn("queued", client.sent[-1][1])
             self.assertEqual(queue.claim_next().sandbox_mode, "workspace-write")
 
+    def test_gpt_alias_enqueues_default_codex_job_without_meeting_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            client = FakeClient()
+            adapter = TelegramAdapter(
+                settings,
+                queue,
+                client,
+                meeting_client=ExplodingMeetingClient(),
+            )
+
+            reply = adapter.handle_update(update("/gpt inspect telegram.py"))
+
+            self.assertTrue(reply.startswith("queued job-"))
+            job = queue.claim_next()
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual(job.prompt, "inspect telegram.py")
+            self.assertEqual(job.sandbox_mode, "workspace-write")
+            self.assertEqual(client.sent[-1], ("42", reply))
+
     def test_run_read_selects_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = make_settings(directory)
