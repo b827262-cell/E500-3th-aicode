@@ -31,6 +31,7 @@ def settings_for(directory: str, *, token: str = "telegram-secret") -> Settings:
     env = {
         "CODEX_ALLOWED_WORKSPACES": str(workspace),
         "CODEX_DEFAULT_WORKSPACE": str(workspace),
+        "CODEX_BRIDGE_DATA_DIR": str(Path(directory) / "state"),
         "TELEGRAM_BOT_TOKEN": token,
         "TELEGRAM_ALLOWED_CHAT_ID": "12345",
     }

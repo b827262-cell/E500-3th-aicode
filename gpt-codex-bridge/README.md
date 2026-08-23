@@ -1,6 +1,6 @@
 # gpt-codex-bridge v2
 
-E500 上的持久化 provider job runner。Telegram 負責驗證、提交任務與發送 outbox 通知；唯一 worker 從 SQLite queue 取 job，依保存的 provider 分派至 Codex 或本機 Claude Code CLI。
+E500 上的持久化 provider job runner。Telegram 負責驗證、提交任務與發送 outbox 通知；唯一 worker 從 SQLite queue 取 job，依保存的 provider 分派至 Codex、本機 Claude Code CLI 或 agy Google OAuth CLI。
 
 ```text
 Telegram getUpdates (long polling, no inbound port)
@@ -15,7 +15,8 @@ Telegram getUpdates (long polling, no inbound port)
        one worker + file lock
              │
              ├── provider=codex → codex exec --sandbox <job.sandbox_mode>
-             └── provider=claude → claude -p <prompt>
+             ├── provider=claude → claude -p <prompt>
+             └── provider=agy → agy -p <prompt> --model gemini-3.7-flash-high --output-format json
              │
              ▼
        structured report.json
@@ -30,7 +31,8 @@ Telegram adapter drain
 AI Meeting commands are proxied from this same E500 Telegram polling process to
 the remote TUF A16 Meeting Room at `http://10.0.3.67:8000`. `/hermes` and
 `/gemini` are Meeting Room requests; `/gpt` is an alias for the local `/run`
-Codex job path. `/all` and `/roundtable` remain Meeting Room operations and may
+Codex job path; `/agy` is the local agy Google OAuth CLI path and never calls the
+Meeting Room. `/all` and `/roundtable` remain Meeting Room operations and may
 include the remote GPT agent. There must remain only one Telegram polling
 process.
 
@@ -41,6 +43,7 @@ process.
 - `TELEGRAM_ALLOWED_CHAT_ID` 在解析 message 前比對；未授權更新不回覆、不 enqueue、不執行 Codex。
 - `CODEX_ALLOWED_WORKSPACES` 是明確的絕對路徑 allowlist；Telegram 不提供 `cwd`，所有 Telegram job 都使用 `CODEX_DEFAULT_WORKSPACE`。
 - job 會持久化 `provider`/`runner`；既有 `/gpt` 維持 `codex`，`/claude` 只會 dispatch 到 ClaudeRunner，不會進 Meeting Room 或 CodexRunner。
+- `/agy` 只會 dispatch 到 AgyRunner；child environment 會移除 `GEMINI_API_KEY` 與 `GOOGLE_API_KEY`，保留 agy 已存在的 Google OAuth credential。程式不執行 `agy login`。
 - worker 使用 SQLite claim guard 加 Unix file lock，最多一個 `running` job。
 - 每個 job 在 SQLite 保存自己的 `sandbox_mode`，只允許 `read-only`、`workspace-write`、`danger-full-access`；未知值直接拒絕。
 - `/run-full` 只接受 `TELEGRAM_ALLOWED_CHAT_ID`；Codex 使用 argv list、`shell=False`、job-specific `--sandbox`、timeout，程式碼不使用 `--dangerously-bypass-approvals-and-sandbox` 或 `--yolo`。
@@ -62,6 +65,7 @@ bridge/
   queue.py           SQLite persistence and atomic claim
   codex_runner.py    fixed sandboxed Codex subprocess + report validation
   claude_runner.py   safe non-interactive Claude Code subprocess + report validation
+  agy_runner.py      safe agy Google OAuth subprocess + JSON response parsing
   worker.py          single worker loop and process lock
   meeting.py         async HTTP client for the remote TUF A16 Meeting Room
 adapters/
@@ -116,6 +120,7 @@ Supported Telegram commands:
 /run-full <task>
 /result <job_id>
 /claude <task>
+/agy <task>
 
 /hermes <message>
 /gemini <message>

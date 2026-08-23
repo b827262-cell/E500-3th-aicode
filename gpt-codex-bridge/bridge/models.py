@@ -8,7 +8,7 @@ from pathlib import Path
 from .sandbox import DEFAULT_SANDBOX_MODE, validate_sandbox_mode
 
 DEFAULT_PROVIDER = "codex"
-SUPPORTED_PROVIDERS = frozenset({"codex", "claude"})
+SUPPORTED_PROVIDERS = frozenset({"agy", "codex", "claude"})
 
 
 def validate_provider(provider: str) -> str:

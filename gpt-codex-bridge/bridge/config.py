@@ -71,6 +71,8 @@ class Settings:
     meeting_read_timeout_seconds: float
     claude_bin: str = "claude"
     claude_timeout_seconds: float = 3600.0
+    agy_bin: str = "agy"
+    agy_timeout_seconds: float = 3600.0
     configured_secret_values: tuple[str, ...] = field(default=(), repr=False)
 
     @classmethod
@@ -158,6 +160,8 @@ class Settings:
             codex_timeout_seconds=_float_env(values, "CODEX_JOB_TIMEOUT_SECONDS", 3600.0),
             claude_bin=values.get("CLAUDE_BIN", "claude"),
             claude_timeout_seconds=_float_env(values, "CLAUDE_JOB_TIMEOUT_SECONDS", 3600.0),
+            agy_bin=values.get("AGY_BIN", "agy"),
+            agy_timeout_seconds=_float_env(values, "AGY_JOB_TIMEOUT_SECONDS", 3600.0),
             worker_poll_seconds=_float_env(values, "CODEX_WORKER_POLL_SECONDS", 1.0),
             max_prompt_length=_int_env(values, "CODEX_MAX_PROMPT_LENGTH", 12000, minimum=1),
             telegram_bot_token=token,
@@ -254,5 +258,19 @@ class Settings:
 
         child_env = dict(os.environ)
         for name in ("TELEGRAM_BOT_TOKEN", "MCP_BEARER_TOKEN", "MEETING_API_TOKEN"):
+            child_env.pop(name, None)
+        return child_env
+
+    def agy_environment(self) -> dict[str, str]:
+        """Return an agy child environment that relies on its existing OAuth state."""
+
+        child_env = dict(os.environ)
+        for name in (
+            "TELEGRAM_BOT_TOKEN",
+            "MCP_BEARER_TOKEN",
+            "MEETING_API_TOKEN",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+        ):
             child_env.pop(name, None)
         return child_env

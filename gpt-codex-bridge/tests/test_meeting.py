@@ -79,6 +79,7 @@ def make_settings(directory: str, **extra: str) -> Settings:
         {
             "CODEX_ALLOWED_WORKSPACES": str(workspace),
             "CODEX_DEFAULT_WORKSPACE": str(workspace),
+            "CODEX_BRIDGE_DATA_DIR": str(Path(directory) / "state"),
             "TELEGRAM_BOT_TOKEN": "bot-secret",
             "TELEGRAM_ALLOWED_CHAT_ID": "42",
             "MEETING_ROOM_URL": "http://10.0.3.67:8000",

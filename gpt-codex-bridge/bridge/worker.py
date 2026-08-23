@@ -9,6 +9,7 @@ from pathlib import Path
 import signal
 import time
 
+from .agy_runner import AgyRunner
 from .claude_runner import ClaudeRunner
 from .codex_runner import CodexRunner
 from .config import Settings
@@ -50,6 +51,7 @@ class Worker:
         runner: CodexRunner,
         *,
         claude_runner: ClaudeRunner | None = None,
+        agy_runner: AgyRunner | None = None,
         poll_seconds: float = 1.0,
         lock_path: Path | None = None,
         sleep=time.sleep,
@@ -57,15 +59,18 @@ class Worker:
         self.queue = queue
         self.runner = runner
         self.claude_runner = claude_runner
+        self.agy_runner = agy_runner
         self.poll_seconds = poll_seconds
         self.lock_path = lock_path or queue.db_path.with_suffix(".worker.lock")
         self._sleep = sleep
 
-    def _runner_for(self, job: Job) -> CodexRunner | ClaudeRunner:
+    def _runner_for(self, job: Job) -> CodexRunner | ClaudeRunner | AgyRunner:
         if job.provider == "codex":
             return self.runner
         if job.provider == "claude" and self.claude_runner is not None:
             return self.claude_runner
+        if job.provider == "agy" and self.agy_runner is not None:
+            return self.agy_runner
         raise RuntimeError(f"runner is not configured for provider={job.provider}")
 
     def run_once(self) -> bool:
@@ -113,6 +118,7 @@ def main() -> int:
     queue = JobQueue(settings.queue_db)
     runner = CodexRunner(settings)
     claude_runner = ClaudeRunner(settings)
+    agy_runner = AgyRunner(settings)
     stop = __import__("threading").Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -120,6 +126,7 @@ def main() -> int:
         queue,
         runner,
         claude_runner=claude_runner,
+        agy_runner=agy_runner,
         poll_seconds=settings.worker_poll_seconds,
     ).run_forever(stop)
     return 0

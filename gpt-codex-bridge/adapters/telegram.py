@@ -174,7 +174,7 @@ class TelegramAdapter:
             return None
         match = _COMMAND_RE.fullmatch(text.strip())
         if not match:
-            reply = "請使用 /ping、/run <task>、/gpt <task>、/claude <task>、/run-read <task>、/run-full <task>、/status 或 /result <job_id>。"
+            reply = "請使用 /ping、/run <task>、/gpt <task>、/agy <task>、/claude <task>、/run-read <task>、/run-full <task>、/status 或 /result <job_id>。"
             self._send_reply(chat_id, reply)
             return reply
         command = match.group("command").lower()
@@ -183,7 +183,7 @@ class TelegramAdapter:
         if command in {"start", "help"}:
             reply = (
                 "Codex job runner 已啟動。使用 /ping、/run <task>、/run-read <task>、"
-                "/run-full <task>、/gpt <task>、/claude <task>、/status、/result <job_id>。"
+                "/run-full <task>、/gpt <task>、/agy <task>、/claude <task>、/status、/result <job_id>。"
             )
         elif command == "ping":
             reply = "PONG"
@@ -199,13 +199,21 @@ class TelegramAdapter:
                 command,
                 provider="claude",
             )
+        elif command == "agy":
+            reply = self._submit(
+                chat_id,
+                args,
+                DEFAULT_SANDBOX_MODE,
+                command,
+                provider="agy",
+            )
         elif command == "result":
             reply = self._result(chat_id, args)
         elif command in _MEETING_COMMANDS:
             reply = await self._meeting_reply(message, chat_id, command, args)
         else:
             reply = (
-                "未知命令。可用：/ping、/run、/gpt、/claude、/run-read、/run-full、/status、/result、"
+                "未知命令。可用：/ping、/run、/gpt、/agy、/claude、/run-read、/run-full、/status、/result、"
                 "/hermes、/gemini、/all、/roundtable、/agents、/meeting-status、"
                 "/meeting-stop、/meeting-reset。"
             )
@@ -430,7 +438,9 @@ class TelegramAdapter:
         else:
             summary, changed_text, attention = self._report_values(report)
         status = "succeeded" if notification.event_type == "succeeded" else "failed"
-        provider_label = {"codex": "Codex", "claude": "Claude"}.get(job.provider, "AI")
+        provider_label = {"agy": "AGY", "codex": "Codex", "claude": "Claude"}.get(
+            job.provider, "AI"
+        )
         details = (
             f"Job: {job.id}\n"
             f"Provider: {job.provider}\n"
