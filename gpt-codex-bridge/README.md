@@ -1,6 +1,6 @@
 # gpt-codex-bridge v2
 
-E500 上的持久化 Codex job runner。Telegram 負責驗證、提交任務與發送 outbox 通知；唯一 worker 從 SQLite queue 取 job，再以每筆 job 保存的 sandbox mode 啟動 `codex exec`。
+E500 上的持久化 provider job runner。Telegram 負責驗證、提交任務與發送 outbox 通知；唯一 worker 從 SQLite queue 取 job，依保存的 provider 分派至 Codex 或本機 Claude Code CLI。
 
 ```text
 Telegram getUpdates (long polling, no inbound port)
@@ -14,8 +14,8 @@ Telegram getUpdates (long polling, no inbound port)
              ▼
        one worker + file lock
              │
-             ▼
-codex exec --sandbox <job.sandbox_mode>
+             ├── provider=codex → codex exec --sandbox <job.sandbox_mode>
+             └── provider=claude → claude -p <prompt>
              │
              ▼
        structured report.json
@@ -40,10 +40,12 @@ process.
 
 - `TELEGRAM_ALLOWED_CHAT_ID` 在解析 message 前比對；未授權更新不回覆、不 enqueue、不執行 Codex。
 - `CODEX_ALLOWED_WORKSPACES` 是明確的絕對路徑 allowlist；Telegram 不提供 `cwd`，所有 Telegram job 都使用 `CODEX_DEFAULT_WORKSPACE`。
+- job 會持久化 `provider`/`runner`；既有 `/gpt` 維持 `codex`，`/claude` 只會 dispatch 到 ClaudeRunner，不會進 Meeting Room 或 CodexRunner。
 - worker 使用 SQLite claim guard 加 Unix file lock，最多一個 `running` job。
 - 每個 job 在 SQLite 保存自己的 `sandbox_mode`，只允許 `read-only`、`workspace-write`、`danger-full-access`；未知值直接拒絕。
 - `/run-full` 只接受 `TELEGRAM_ALLOWED_CHAT_ID`；Codex 使用 argv list、`shell=False`、job-specific `--sandbox`、timeout，程式碼不使用 `--dangerously-bypass-approvals-and-sandbox` 或 `--yolo`。
 - Telegram adapter 沒有 raw shell API；`/run` 是 Codex task，不是 shell command endpoint。
+- `/claude` 使用 `claude -p <prompt>`（argv-based，`shell=False`）；不使用 `--dangerously-skip-permissions`，也不啟動第二個 Telegram polling process。
 - worker 不呼叫 Telegram API；job terminal update 與 `notifications.pending` 建立在同一個 SQLite transaction。
 - Telegram adapter 定期 drain pending notifications；送出失敗會保留 retryable row，adapter restart/system reboot 後繼續補送。
 - 功能啟用前已 terminal 的歷史 job 不會被回補通知；notification outbox 只在新的 terminal transition 時建立。
@@ -58,7 +60,8 @@ bridge/
   models.py          Job model
   sandbox.py         validated per-job sandbox modes
   queue.py           SQLite persistence and atomic claim
-  codex_runner.py    fixed sandboxed subprocess + report validation
+  codex_runner.py    fixed sandboxed Codex subprocess + report validation
+  claude_runner.py   safe non-interactive Claude Code subprocess + report validation
   worker.py          single worker loop and process lock
   meeting.py         async HTTP client for the remote TUF A16 Meeting Room
 adapters/
@@ -112,6 +115,7 @@ Supported Telegram commands:
 /run-read <task>
 /run-full <task>
 /result <job_id>
+/claude <task>
 
 /hermes <message>
 /gemini <message>
@@ -179,6 +183,11 @@ When a job reaches a terminal state, the Telegram adapter automatically reads
 this structured report and sends a safe result summary to the originating chat.
 `/result <job_id>` remains available for historical queries; neither path
 parses natural-language Codex stdout.
+
+Claude jobs use the same report and notification outbox contract, while the
+notification explicitly labels `Provider: claude` and `Runner: claude`. Claude
+stdout/stderr is captured by the worker, redacted, and converted to a safe
+success or failure summary.
 
 ## Tests
 

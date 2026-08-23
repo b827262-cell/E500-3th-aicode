@@ -73,17 +73,21 @@ def validate_report(report: Any) -> dict[str, Any]:
     return report
 
 
-def _redact(value: Any, secrets: tuple[str, ...]) -> Any:
+def _redact(
+    value: Any,
+    secrets: tuple[str, ...],
+    redactor: Callable[[str], str] | None = None,
+) -> Any:
     if isinstance(value, str):
         redacted = value
         for secret in secrets:
             if secret:
                 redacted = redacted.replace(secret, "[REDACTED]")
-        return redacted
+        return redactor(redacted) if redactor else redacted
     if isinstance(value, list):
-        return [_redact(item, secrets) for item in value]
+        return [_redact(item, secrets, redactor) for item in value]
     if isinstance(value, dict):
-        return {key: _redact(item, secrets) for key, item in value.items()}
+        return {key: _redact(item, secrets, redactor) for key, item in value.items()}
     return value
 
 
@@ -102,6 +106,8 @@ class CodexRunner:
         self._kill_process_group = kill_process_group or self._kill_group
 
     def command_for(self, job: Job, report_path: Path) -> list[str]:
+        if job.provider != "codex":
+            raise ValueError("CodexRunner can only run Codex jobs")
         sandbox_mode = validate_sandbox_mode(job.sandbox_mode)
         workspace = self.settings.validate_workspace(job.workspace)
         # Keep this as argv, never shell text. Do not add approval or
@@ -134,7 +140,11 @@ class CodexRunner:
         return self.settings.report_dir / f"{job.id}.json"
 
     def _write_report(self, path: Path, report: dict[str, Any]) -> None:
-        safe_report = _redact(report, self.settings.secret_values)
+        safe_report = _redact(
+            report,
+            self.settings.secret_values,
+            self.settings.redact_text,
+        )
         validate_report(safe_report)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(
@@ -219,7 +229,10 @@ class CodexRunner:
 
         try:
             raw_report = json.loads(report_path.read_text(encoding="utf-8"))
-            report = self._report_for_job(_redact(raw_report, self.settings.secret_values), job)
+            report = self._report_for_job(
+                _redact(raw_report, self.settings.secret_values, self.settings.redact_text),
+                job,
+            )
         except (OSError, json.JSONDecodeError, ReportValidationError):
             report = {
                 "status": "failed",

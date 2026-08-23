@@ -7,6 +7,15 @@ from pathlib import Path
 
 from .sandbox import DEFAULT_SANDBOX_MODE, validate_sandbox_mode
 
+DEFAULT_PROVIDER = "codex"
+SUPPORTED_PROVIDERS = frozenset({"codex", "claude"})
+
+
+def validate_provider(provider: str) -> str:
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"unsupported job provider: {provider}")
+    return provider
+
 
 @dataclass(frozen=True)
 class Job:
@@ -22,9 +31,17 @@ class Job:
     error: str | None = None
     exit_code: int | None = None
     sandbox_mode: str = DEFAULT_SANDBOX_MODE
+    provider: str = DEFAULT_PROVIDER
 
     def __post_init__(self) -> None:
         validate_sandbox_mode(self.sandbox_mode)
+        validate_provider(self.provider)
+
+    @property
+    def runner(self) -> str:
+        """Compatibility name for the executable runner selected by provider."""
+
+        return self.provider
 
     @classmethod
     def from_row(cls, row: object) -> "Job":
@@ -43,6 +60,7 @@ class Job:
             error=data.get("error"),
             exit_code=int(data["exit_code"]) if data.get("exit_code") is not None else None,
             sandbox_mode=data["sandbox_mode"],
+            provider=data.get("provider", DEFAULT_PROVIDER),
         )
 
 

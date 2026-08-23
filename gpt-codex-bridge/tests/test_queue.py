@@ -31,6 +31,7 @@ class QueueTests(unittest.TestCase):
             recovered = restarted.get(job.id)
             self.assertEqual(recovered.status, "queued")
             self.assertEqual(recovered.sandbox_mode, "read-only")
+            self.assertEqual(recovered.provider, "codex")
             self.assertEqual(restarted.claim_next().id, job.id)
 
     def test_legacy_schema_migrates_to_default_mode(self) -> None:
@@ -63,6 +64,25 @@ class QueueTests(unittest.TestCase):
             queue = JobQueue(db)
             job = queue.get("job-0123456789abcdef")
             self.assertEqual(job.sandbox_mode, "workspace-write")
+            self.assertEqual(job.provider, "codex")
+
+    def test_provider_is_persisted_and_unknown_provider_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            job = queue.submit(
+                chat_id=1,
+                prompt="claude task",
+                workspace=Path(directory),
+                provider="claude",
+            )
+            self.assertEqual(queue.get(job.id).provider, "claude")
+            with self.assertRaises(ValueError):
+                queue.submit(
+                    chat_id=1,
+                    prompt="unknown task",
+                    workspace=Path(directory),
+                    provider="unknown",
+                )
 
     def test_unknown_sandbox_mode_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

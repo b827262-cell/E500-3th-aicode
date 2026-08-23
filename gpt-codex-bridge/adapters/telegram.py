@@ -1,6 +1,6 @@
 """Telegram Bot API long-polling adapter and notification outbox drainer.
 
-This module authenticates, enqueues jobs, and sends notifications. It never starts Codex.
+This module authenticates, enqueues jobs, and sends notifications. It never starts a provider CLI.
 """
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ class TelegramAdapter:
             return None
         match = _COMMAND_RE.fullmatch(text.strip())
         if not match:
-            reply = "請使用 /ping、/run <task>、/gpt <task>、/run-read <task>、/run-full <task>、/status 或 /result <job_id>。"
+            reply = "請使用 /ping、/run <task>、/gpt <task>、/claude <task>、/run-read <task>、/run-full <task>、/status 或 /result <job_id>。"
             self._send_reply(chat_id, reply)
             return reply
         command = match.group("command").lower()
@@ -183,7 +183,7 @@ class TelegramAdapter:
         if command in {"start", "help"}:
             reply = (
                 "Codex job runner 已啟動。使用 /ping、/run <task>、/run-read <task>、"
-                "/run-full <task>、/gpt <task>、/status、/result <job_id>。"
+                "/run-full <task>、/gpt <task>、/claude <task>、/status、/result <job_id>。"
             )
         elif command == "ping":
             reply = "PONG"
@@ -191,13 +191,21 @@ class TelegramAdapter:
             reply = self._status(chat_id)
         elif command in _RUN_COMMAND_MODES:
             reply = self._submit(chat_id, args, _RUN_COMMAND_MODES[command], command)
+        elif command == "claude":
+            reply = self._submit(
+                chat_id,
+                args,
+                DEFAULT_SANDBOX_MODE,
+                command,
+                provider="claude",
+            )
         elif command == "result":
             reply = self._result(chat_id, args)
         elif command in _MEETING_COMMANDS:
             reply = await self._meeting_reply(message, chat_id, command, args)
         else:
             reply = (
-                "未知命令。可用：/ping、/run、/gpt、/run-read、/run-full、/status、/result、"
+                "未知命令。可用：/ping、/run、/gpt、/claude、/run-read、/run-full、/status、/result、"
                 "/hermes、/gemini、/all、/roundtable、/agents、/meeting-status、"
                 "/meeting-stop、/meeting-reset。"
             )
@@ -211,8 +219,7 @@ class TelegramAdapter:
         return asyncio.run(self.handle_update_async(update))
 
     def _send_reply(self, chat_id: str, text: str) -> None:
-        for secret in self.settings.secret_values:
-            text = text.replace(secret, "[REDACTED]")
+        text = self.settings.redact_text(text)
         for chunk in split_telegram_message(text):
             self.client.send_message(chat_id, chunk)
 
@@ -315,13 +322,23 @@ class TelegramAdapter:
         if jobs:
             lines.append("recent jobs:")
             lines.extend(
-                f"{job.id}: {job.status} sandbox_mode={job.sandbox_mode}" for job in jobs
+                f"{job.id}: {job.status} provider={job.provider} runner={job.runner} "
+                f"sandbox_mode={job.sandbox_mode}"
+                for job in jobs
             )
         else:
             lines.append("sandbox_mode=none")
         return "\n".join(lines)
 
-    def _submit(self, chat_id: str, prompt: str, sandbox_mode: str, command: str) -> str:
+    def _submit(
+        self,
+        chat_id: str,
+        prompt: str,
+        sandbox_mode: str,
+        command: str,
+        *,
+        provider: str = "codex",
+    ) -> str:
         if not prompt:
             return f"用法：/{command} <task>"
         if len(prompt) > self.settings.max_prompt_length:
@@ -339,8 +356,9 @@ class TelegramAdapter:
             prompt=prompt,
             workspace=self.settings.default_workspace,
             sandbox_mode=sandbox_mode,
+            provider=provider,
         )
-        return f"queued {job.id}"
+        return f"queued {job.id} provider={job.provider} runner={job.runner}"
 
     def _result(self, chat_id: str, job_id: str) -> str:
         if not job_id or not re.fullmatch(r"job-[a-f0-9]{16}", job_id):
@@ -349,13 +367,21 @@ class TelegramAdapter:
         if job is None:
             return "找不到這個 job。"
         if job.report_path is None or not job.report_path.is_file():
-            return f"{job.id}: {job.status} sandbox_mode={job.sandbox_mode}"
+            return (
+                f"{job.id}: {job.status} provider={job.provider} runner={job.runner} "
+                f"sandbox_mode={job.sandbox_mode}"
+            )
         report = self._load_report(job)
         if report is None:
-            return f"{job.id}: {job.status} sandbox_mode={job.sandbox_mode}（report 尚未可讀取）"
+            return (
+                f"{job.id}: {job.status} provider={job.provider} runner={job.runner} "
+                f"sandbox_mode={job.sandbox_mode}（report 尚未可讀取）"
+            )
         summary, changed_text, attention = self._report_values(report)
         return (
             f"{job.id}: {report.get('status', job.status)}\n"
+            f"provider: {job.provider}\n"
+            f"runner: {job.runner}\n"
             f"sandbox_mode: {job.sandbox_mode}\n"
             f"summary: {summary[:1000]}\n"
             f"changed_files: {changed_text}\n"
@@ -385,8 +411,7 @@ class TelegramAdapter:
 
     def _safe_short(self, value: Any, *, limit: int = 300) -> str:
         text = str(value)
-        for secret in self.settings.secret_values:
-            text = text.replace(secret, "[REDACTED]")
+        text = self.settings.redact_text(text)
         text = " ".join(text.split())
         return text[:limit] or "unknown error"
 
@@ -405,8 +430,11 @@ class TelegramAdapter:
         else:
             summary, changed_text, attention = self._report_values(report)
         status = "succeeded" if notification.event_type == "succeeded" else "failed"
+        provider_label = {"codex": "Codex", "claude": "Claude"}.get(job.provider, "AI")
         details = (
             f"Job: {job.id}\n"
+            f"Provider: {job.provider}\n"
+            f"Runner: {job.runner}\n"
             f"Status: {status}\n"
             f"Sandbox: {job.sandbox_mode}\n\n"
             f"Result:\n{summary}\n\n"
@@ -417,12 +445,12 @@ class TelegramAdapter:
         )
         if notification.event_type == "succeeded":
             return (
-                "✅ Codex job completed\n\n"
+                f"✅ {provider_label} job completed\n\n"
                 f"{details}\n\n"
                 f"/result {job.id}"
             )
         return (
-            "❌ Codex job failed\n\n"
+            f"❌ {provider_label} job failed\n\n"
             f"{details}\n"
             f"Error: {self._safe_short(job.error or 'Codex job failed')}\n\n"
             f"/result {job.id}"

@@ -10,7 +10,7 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from .models import Job, Notification
+from .models import DEFAULT_PROVIDER, Job, Notification, validate_provider
 from .sandbox import DEFAULT_SANDBOX_MODE, validate_sandbox_mode
 
 
@@ -51,6 +51,7 @@ class JobQueue:
                     chat_id TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     workspace TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT 'codex',
                     sandbox_mode TEXT NOT NULL DEFAULT 'workspace-write'
                         CHECK (sandbox_mode IN ('read-only', 'workspace-write', 'danger-full-access')),
                     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
@@ -75,10 +76,16 @@ class JobQueue:
                 connection.execute(
                     "ALTER TABLE jobs ADD COLUMN sandbox_mode TEXT NOT NULL DEFAULT 'workspace-write'"
                 )
+            if "provider" not in columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN provider TEXT NOT NULL DEFAULT 'codex'"
+                )
             if "exit_code" not in columns:
                 connection.execute("ALTER TABLE jobs ADD COLUMN exit_code INTEGER")
             for row in connection.execute("SELECT DISTINCT sandbox_mode FROM jobs"):
                 validate_sandbox_mode(row["sandbox_mode"])
+            for row in connection.execute("SELECT DISTINCT provider FROM jobs"):
+                validate_provider(row["provider"])
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS notifications (
@@ -106,8 +113,10 @@ class JobQueue:
         prompt: str,
         workspace: Path,
         sandbox_mode: str = DEFAULT_SANDBOX_MODE,
+        provider: str = DEFAULT_PROVIDER,
     ) -> Job:
         validate_sandbox_mode(sandbox_mode)
+        validate_provider(provider)
         job_id = f"job-{uuid.uuid4().hex[:16]}"
         created_at = _now()
         normalized_workspace = Path(workspace).resolve(strict=False)
@@ -115,11 +124,19 @@ class JobQueue:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    id, chat_id, prompt, workspace, sandbox_mode, status, created_at
+                    id, chat_id, prompt, workspace, provider, sandbox_mode, status, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, 'queued', ?)
+                VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
                 """,
-                (job_id, str(chat_id), prompt, str(normalized_workspace), sandbox_mode, created_at),
+                (
+                    job_id,
+                    str(chat_id),
+                    prompt,
+                    str(normalized_workspace),
+                    provider,
+                    sandbox_mode,
+                    created_at,
+                ),
             )
         job = self.get(job_id)
         assert job is not None

@@ -9,8 +9,10 @@ from pathlib import Path
 import signal
 import time
 
+from .claude_runner import ClaudeRunner
 from .codex_runner import CodexRunner
 from .config import Settings
+from .models import Job
 from .queue import JobQueue
 
 
@@ -47,36 +49,52 @@ class Worker:
         queue: JobQueue,
         runner: CodexRunner,
         *,
+        claude_runner: ClaudeRunner | None = None,
         poll_seconds: float = 1.0,
         lock_path: Path | None = None,
         sleep=time.sleep,
     ):
         self.queue = queue
         self.runner = runner
+        self.claude_runner = claude_runner
         self.poll_seconds = poll_seconds
         self.lock_path = lock_path or queue.db_path.with_suffix(".worker.lock")
         self._sleep = sleep
+
+    def _runner_for(self, job: Job) -> CodexRunner | ClaudeRunner:
+        if job.provider == "codex":
+            return self.runner
+        if job.provider == "claude" and self.claude_runner is not None:
+            return self.claude_runner
+        raise RuntimeError(f"runner is not configured for provider={job.provider}")
 
     def run_once(self) -> bool:
         job = self.queue.claim_next()
         if job is None:
             return False
+        selected_runner: CodexRunner | ClaudeRunner | None = None
         try:
-            outcome = self.runner.run(job)
+            selected_runner = self._runner_for(job)
+            outcome = selected_runner.run(job)
             self.queue.finish(
                 job.id,
                 succeeded=outcome.succeeded,
                 report_path=outcome.report_path,
-                error=None if outcome.succeeded else "Codex job failed",
+                error=None if outcome.succeeded else f"{job.provider.title()} job failed",
                 exit_code=outcome.exit_code,
             )
         except Exception:
-            report_path = self.runner.internal_report(job, summary="Codex runner failed unexpectedly")
+            if selected_runner is None:
+                selected_runner = self._runner_for(job)
+            report_path = selected_runner.internal_report(
+                job,
+                summary=f"{job.provider.title()} runner failed unexpectedly",
+            )
             self.queue.finish(
                 job.id,
                 succeeded=False,
                 report_path=report_path,
-                error="Codex runner failed unexpectedly",
+                error=f"{job.provider.title()} runner failed unexpectedly",
                 exit_code=-1,
             )
         return True
@@ -94,10 +112,16 @@ def main() -> int:
     settings.ensure_runtime_dirs()
     queue = JobQueue(settings.queue_db)
     runner = CodexRunner(settings)
+    claude_runner = ClaudeRunner(settings)
     stop = __import__("threading").Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    Worker(queue, runner, poll_seconds=settings.worker_poll_seconds).run_forever(stop)
+    Worker(
+        queue,
+        runner,
+        claude_runner=claude_runner,
+        poll_seconds=settings.worker_poll_seconds,
+    ).run_forever(stop)
     return 0
 
 
