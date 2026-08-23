@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+# Read the X11 clipboard belonging to the user's GNOME session without
+# exporting DISPLAY or XAUTHORITY into the caller's shell.
+_gpt_gui_env() {
+    local gui_pid entry display xauthority
+
+    gui_pid=$(pgrep -u "$UID" -n -x gnome-shell) || {
+        printf '%s\n' 'gptclip: cannot find gnome-shell GUI session' >&2
+        return 1
+    }
+
+    if [[ ! -r "/proc/$gui_pid/environ" ]]; then
+        printf '%s\n' "gptclip: cannot read /proc/$gui_pid/environ" >&2
+        return 1
+    fi
+
+    while IFS= read -r -d '' entry; do
+        case $entry in
+            DISPLAY=*) display=${entry#DISPLAY=} ;;
+            XAUTHORITY=*) xauthority=${entry#XAUTHORITY=} ;;
+        esac
+    done < "/proc/$gui_pid/environ"
+
+    if [[ -z ${display:-} ]]; then
+        printf '%s\n' 'gptclip: DISPLAY was not found in gnome-shell environment' >&2
+        return 1
+    fi
+
+    if [[ -z ${xauthority:-} ]]; then
+        printf '%s\n' 'gptclip: XAUTHORITY was not found in gnome-shell environment' >&2
+        return 1
+    fi
+
+    if [[ ! -f $xauthority || ! -r $xauthority ]]; then
+        printf '%s\n' "gptclip: XAUTHORITY is missing or unreadable: $xauthority" >&2
+        return 1
+    fi
+
+    printf '%s\n%s\n' "$display" "$xauthority"
+}
+
+main() {
+    local gui_env gui_display gui_xauthority xclip_status
+
+    if (( $# != 0 )); then
+        printf 'Usage: %s\n' "${0##*/}" >&2
+        return 2
+    fi
+
+    if ! command -v xclip >/dev/null 2>&1; then
+        printf '%s\n' 'gptclip: xclip is not installed or not in PATH' >&2
+        return 127
+    fi
+
+    if ! gui_env=$(_gpt_gui_env); then
+        return 1
+    fi
+
+    gui_display=${gui_env%%$'\n'*}
+    gui_xauthority=${gui_env#*$'\n'}
+    if [[ -z $gui_display || -z $gui_xauthority || $gui_env != *$'\n'* ]]; then
+        printf '%s\n' 'gptclip: invalid GUI environment returned by helper' >&2
+        return 1
+    fi
+
+    DISPLAY="$gui_display" XAUTHORITY="$gui_xauthority" \
+        xclip -selection clipboard -o
+    xclip_status=$?
+    if (( xclip_status != 0 )); then
+        printf '%s\n' "gptclip: xclip clipboard read failed (exit $xclip_status)" >&2
+    fi
+    return "$xclip_status"
+}
+
+main "$@"

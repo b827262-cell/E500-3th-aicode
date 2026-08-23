@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+from pathlib import Path
+import tempfile
+import unittest
+
+from adapters.telegram import TelegramAdapter, TelegramClient
+from bridge.config import Settings
+from bridge.queue import JobQueue
+
+
+class FakeClient:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    def send_message(self, chat_id: str, text: str) -> None:
+        self.sent.append((chat_id, text))
+
+
+def make_settings(directory: str) -> Settings:
+    workspace = Path(directory) / "repo"
+    workspace.mkdir()
+    return Settings.from_env(
+        {
+            "CODEX_ALLOWED_WORKSPACES": str(workspace),
+            "CODEX_DEFAULT_WORKSPACE": str(workspace),
+            "TELEGRAM_BOT_TOKEN": "bot-secret",
+            "TELEGRAM_ALLOWED_CHAT_ID": "42",
+        },
+        root_dir=Path(__file__).resolve().parents[1],
+    )
+
+
+def update(text: str) -> dict:
+    return {"update_id": 1, "message": {"chat": {"id": 42}, "text": text}}
+
+
+class TelegramAdapterTests(unittest.TestCase):
+    def test_authorized_run_enqueues_without_starting_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            client = FakeClient()
+            adapter = TelegramAdapter(settings, queue, client)
+            reply = adapter.handle_update(update("/run fix the pytest failure"))
+            self.assertTrue(reply.startswith("queued job-"))
+            self.assertEqual(queue.counts()["queued"], 1)
+            self.assertIn("queued", client.sent[-1][1])
+            self.assertEqual(queue.claim_next().sandbox_mode, "workspace-write")
+
+    def test_run_read_selects_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            adapter = TelegramAdapter(settings, queue, FakeClient())
+            adapter.handle_update(update("/run-read inspect files"))
+            self.assertEqual(queue.claim_next().sandbox_mode, "read-only")
+
+    def test_run_full_selects_danger_full_access_for_authorized_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            adapter = TelegramAdapter(settings, queue, FakeClient())
+            adapter.handle_update(update("/run-full inspect and repair"))
+            self.assertEqual(queue.claim_next().sandbox_mode, "danger-full-access")
+
+    def test_status_displays_job_sandbox_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            adapter = TelegramAdapter(settings, queue, FakeClient())
+            adapter.handle_update(update("/run-read inspect files"))
+            reply = adapter.handle_update(update("/status"))
+            self.assertIn("sandbox_mode=read-only", reply)
+
+    def test_result_is_human_readable_and_chat_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            client = FakeClient()
+            adapter = TelegramAdapter(settings, queue, client)
+            job = queue.submit(chat_id=42, prompt="task", workspace=settings.default_workspace)
+            report_path = Path(directory) / "report.json"
+            report_path.write_text(
+                '{"status":"success","summary":"done","changed_files":["a.py"],'
+                '"tests":[],"git_status":"","needs_attention":false,'
+                '"sandbox_mode":"workspace-write"}',
+                encoding="utf-8",
+            )
+            claimed = queue.claim_next()
+            queue.finish(job.id, succeeded=True, report_path=report_path, error=None)
+            reply = adapter.handle_update(update(f"/result {claimed.id}"))
+            self.assertIn("summary: done", reply)
+            self.assertIn("a.py", reply)
+            self.assertIn("sandbox_mode: workspace-write", reply)
+
+    def test_mock_telegram_api_uses_long_polling_methods(self) -> None:
+        calls: list[tuple[str, dict]] = []
+
+        def transport(method: str, payload: dict) -> dict:
+            calls.append((method, payload))
+            if method == "getUpdates":
+                return {"ok": True, "result": []}
+            return {"ok": True, "result": True}
+
+        client = TelegramClient("bot-secret", transport=transport)
+        client.delete_webhook()
+        client.get_updates(offset=7, timeout=30)
+        client.send_message("42", "queued")
+        self.assertEqual([item[0] for item in calls], ["deleteWebhook", "getUpdates", "sendMessage"])
+        self.assertEqual(calls[1][1]["offset"], 7)
+        self.assertEqual(calls[1][1]["timeout"], 30)
+        self.assertNotIn("bot-secret", repr(calls))
+
+
+if __name__ == "__main__":
+    unittest.main()

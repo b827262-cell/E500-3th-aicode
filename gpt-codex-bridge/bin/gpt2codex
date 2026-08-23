@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || exit 1
+GPTCLIP="$SCRIPT_DIR/gptclip"
+
+main() {
+    local clipboard_file clip_status grep_status
+
+    if (( $# != 0 )); then
+        printf 'Usage: %s\n' "${0##*/}" >&2
+        return 2
+    fi
+
+    if ! command -v codex >/dev/null 2>&1; then
+        printf '%s\n' 'gpt2codex: codex is not installed or not in PATH' >&2
+        return 127
+    fi
+
+    clipboard_file=$(mktemp "${TMPDIR:-/tmp}/gpt2codex.XXXXXX") || {
+        printf '%s\n' 'gpt2codex: cannot create temporary clipboard file' >&2
+        return 1
+    }
+    trap 'rm -f -- "$clipboard_file"' EXIT
+
+    "$GPTCLIP" >"$clipboard_file"
+    clip_status=$?
+    if (( clip_status != 0 )); then
+        printf '%s\n' 'gpt2codex: clipboard read failed; Codex was not started' >&2
+        return "$clip_status"
+    fi
+
+    if [[ ! -s $clipboard_file ]]; then
+        printf '%s\n' 'gpt2codex: clipboard is empty; Codex was not started' >&2
+        return 1
+    fi
+
+    LC_ALL=C grep -q '[^[:space:]]' "$clipboard_file"
+    grep_status=$?
+    case $grep_status in
+        0) ;;
+        1)
+            printf '%s\n' 'gpt2codex: clipboard contains only whitespace; Codex was not started' >&2
+            return 1
+            ;;
+        *)
+            printf '%s\n' 'gpt2codex: cannot validate clipboard content; Codex was not started' >&2
+            return 1
+            ;;
+    esac
+
+    # File redirection preserves all bytes and cannot start Codex before the
+    # clipboard reader has returned success.
+    codex exec - <"$clipboard_file"
+}
+
+main "$@"

@@ -1,0 +1,201 @@
+"""Environment-backed configuration for the v2 job runner."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import os
+from pathlib import Path
+import re
+
+
+class ConfigurationError(ValueError):
+    """Raised when required runner configuration is missing or unsafe."""
+
+
+_CHAT_ID_RE = re.compile(r"^-?[0-9]+$")
+
+
+def _path(value: str) -> Path:
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def _int_env(env: dict[str, str], name: str, default: int, *, minimum: int = 0) -> int:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer") from exc
+    if value < minimum:
+        raise ConfigurationError(f"{name} must be >= {minimum}")
+    return value
+
+
+def _float_env(env: dict[str, str], name: str, default: float, *, minimum: float = 0.1) -> float:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number") from exc
+    if value < minimum:
+        raise ConfigurationError(f"{name} must be >= {minimum}")
+    return value
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Validated settings shared by adapters, queue, worker, and runner."""
+
+    root_dir: Path
+    data_dir: Path
+    queue_db: Path
+    report_dir: Path
+    allowed_workspaces: tuple[Path, ...]
+    default_workspace: Path
+    schema_path: Path
+    codex_bin: str
+    codex_timeout_seconds: float
+    worker_poll_seconds: float
+    max_prompt_length: int
+    telegram_bot_token: str | None
+    telegram_allowed_chat_id: str | None
+    telegram_api_base: str
+    telegram_poll_timeout_seconds: int
+    telegram_request_timeout_seconds: int
+    meeting_room_url: str
+    meeting_api_token: str | None = field(repr=False)
+    meeting_connect_timeout_seconds: float
+    meeting_read_timeout_seconds: float
+
+    @classmethod
+    def from_env(
+        cls,
+        env: dict[str, str] | None = None,
+        *,
+        root_dir: Path | None = None,
+        require_telegram: bool = False,
+    ) -> "Settings":
+        values = dict(os.environ if env is None else env)
+        root = (root_dir or Path(__file__).resolve().parent.parent).resolve()
+
+        raw_workspaces = values.get("CODEX_ALLOWED_WORKSPACES", "")
+        workspace_values = [item for item in raw_workspaces.split(os.pathsep) if item]
+        if not workspace_values:
+            raise ConfigurationError("CODEX_ALLOWED_WORKSPACES is required")
+        workspaces = tuple(_path(item) for item in workspace_values)
+        if len(set(workspaces)) != len(workspaces):
+            raise ConfigurationError("CODEX_ALLOWED_WORKSPACES contains duplicates")
+        for workspace in workspaces:
+            if not workspace.is_absolute():
+                raise ConfigurationError("allowed workspaces must be absolute paths")
+            if not workspace.is_dir():
+                raise ConfigurationError(f"allowed workspace is not a directory: {workspace}")
+
+        configured_default = values.get("CODEX_DEFAULT_WORKSPACE", "")
+        if configured_default:
+            default_workspace = _path(configured_default)
+        elif len(workspaces) == 1:
+            default_workspace = workspaces[0]
+        else:
+            raise ConfigurationError(
+                "CODEX_DEFAULT_WORKSPACE is required when multiple workspaces are allowed"
+            )
+        if default_workspace not in workspaces:
+            raise ConfigurationError("CODEX_DEFAULT_WORKSPACE is not in CODEX_ALLOWED_WORKSPACES")
+
+        data_dir = _path(
+            values.get(
+                "CODEX_BRIDGE_DATA_DIR",
+                str(Path.home() / ".local" / "state" / "gpt-codex-bridge"),
+            )
+        )
+        queue_db = _path(values.get("CODEX_QUEUE_DB", str(data_dir / "jobs.sqlite3")))
+        report_dir = _path(values.get("CODEX_REPORT_DIR", str(data_dir / "reports")))
+        schema_path = _path(
+            values.get("CODEX_REPORT_SCHEMA", str(root / "schemas" / "codex_report.schema.json"))
+        )
+
+        token = values.get("TELEGRAM_BOT_TOKEN") or None
+        allowed_chat_id = values.get("TELEGRAM_ALLOWED_CHAT_ID") or None
+        if require_telegram and not token:
+            raise ConfigurationError("TELEGRAM_BOT_TOKEN is required for Telegram adapter")
+        if require_telegram and not allowed_chat_id:
+            raise ConfigurationError("TELEGRAM_ALLOWED_CHAT_ID is required for Telegram adapter")
+        if allowed_chat_id and not _CHAT_ID_RE.fullmatch(allowed_chat_id):
+            raise ConfigurationError("TELEGRAM_ALLOWED_CHAT_ID must be a numeric Telegram chat id")
+
+        return cls(
+            root_dir=root,
+            data_dir=data_dir,
+            queue_db=queue_db,
+            report_dir=report_dir,
+            allowed_workspaces=workspaces,
+            default_workspace=default_workspace,
+            schema_path=schema_path,
+            codex_bin=values.get("CODEX_BIN", "codex"),
+            codex_timeout_seconds=_float_env(values, "CODEX_JOB_TIMEOUT_SECONDS", 3600.0),
+            worker_poll_seconds=_float_env(values, "CODEX_WORKER_POLL_SECONDS", 1.0),
+            max_prompt_length=_int_env(values, "CODEX_MAX_PROMPT_LENGTH", 12000, minimum=1),
+            telegram_bot_token=token,
+            telegram_allowed_chat_id=allowed_chat_id,
+            telegram_api_base=values.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"),
+            telegram_poll_timeout_seconds=_int_env(
+                values, "TELEGRAM_POLL_TIMEOUT_SECONDS", 30, minimum=0
+            ),
+            telegram_request_timeout_seconds=_int_env(
+                values, "TELEGRAM_REQUEST_TIMEOUT_SECONDS", 45, minimum=1
+            ),
+            meeting_room_url=(values.get("MEETING_ROOM_URL") or "http://10.0.3.67:8000").rstrip("/"),
+            meeting_api_token=values.get("MEETING_API_TOKEN") or None,
+            meeting_connect_timeout_seconds=_float_env(
+                values, "MEETING_CONNECT_TIMEOUT_SECONDS", 5.0
+            ),
+            meeting_read_timeout_seconds=_float_env(
+                values, "MEETING_READ_TIMEOUT_SECONDS", 330.0
+            ),
+        )
+
+    def ensure_runtime_dirs(self) -> None:
+        """Create private state directories and verify required static files."""
+
+        self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.report_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(self.data_dir, 0o700)
+            os.chmod(self.report_dir, 0o700)
+        except OSError:
+            pass
+        if not self.schema_path.is_file():
+            raise ConfigurationError(f"report schema does not exist: {self.schema_path}")
+
+    def validate_workspace(self, workspace: Path) -> Path:
+        """Normalize and enforce the configured workspace allowlist."""
+
+        normalized = _path(str(workspace))
+        if normalized not in self.allowed_workspaces:
+            raise ConfigurationError("job workspace is not in CODEX_ALLOWED_WORKSPACES")
+        return normalized
+
+    @property
+    def secret_values(self) -> tuple[str, ...]:
+        """Known secret values used for report redaction and child-env filtering."""
+
+        values = [
+            self.telegram_bot_token,
+            os.environ.get("MCP_BEARER_TOKEN"),
+            os.environ.get("CODEX_API_KEY"),
+            os.environ.get("OPENAI_API_KEY"),
+            self.meeting_api_token,
+        ]
+        return tuple(value for value in values if value)
+
+    def codex_environment(self) -> dict[str, str]:
+        """Return a child environment without inbound adapter credentials."""
+
+        child_env = dict(os.environ)
+        for name in ("TELEGRAM_BOT_TOKEN", "MCP_BEARER_TOKEN", "MEETING_API_TOKEN"):
+            child_env.pop(name, None)
+        return child_env
